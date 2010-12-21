@@ -650,9 +650,11 @@ module SimpleRecord
             # could make this quicker by just getting item_names and deleting attributes rather than creating objects
             obs = self.find(params)
             i   = 0
-            obs.each do |a|
-                a.delete
-                i+=1
+            unless (obs.nil?)
+                obs.each do |a|
+                    a.delete
+                    i+=1
+                end
             end
             return i
         end
@@ -660,9 +662,11 @@ module SimpleRecord
         def self.destroy_all(*params)
             obs = self.find(params)
             i   = 0
-            obs.each do |a|
-                a.destroy
-                i+=1
+            unless (obs.nil?)
+                obs.each do |a|
+                    a.destroy
+                    i+=1
+                end
             end
             return i
         end
