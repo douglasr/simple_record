@@ -4,10 +4,10 @@ require File.join(File.dirname(__FILE__), "./test_helpers")
 require File.join(File.dirname(__FILE__), "./test_base")
 require "yaml"
 require 'aws'
-require 'my_model'
-require 'my_child_model'
-require 'model_with_enc'
-require 'active_support'
+require_relative 'my_model'
+require_relative 'my_child_model'
+require_relative 'model_with_enc'
+require 'active_support/core_ext'
 
 # Tests for SimpleRecord
 #
@@ -30,28 +30,37 @@ class TestJson < TestBase
 
         mm.save
 
+        puts 'no trying an array'
+
         data = {}
         models = []
         data[:models] = models
 
         models << mm
 
-        jsoned = JSON.generate models
+        jsoned = models.to_json
         puts 'jsoned=' + jsoned
         unjsoned = JSON.parse jsoned
         puts 'unjsoned=' + unjsoned.inspect
         assert unjsoned.size == models.size
         assert unjsoned[0].name == mm.name
         assert unjsoned[0].age == mm.age
+        assert unjsoned[0].created.present?
+        assert unjsoned[0].id.present?
+        assert unjsoned[0].id == mm.id, "unjsoned.id=#{unjsoned[0].id}"
+
+        puts 'array good'
 
         t = Tester.new
         t2 = Tester.new
         t2.x1 = "i'm number 2"
         t.x1 = 1
         t.x2 = t2
-        t.to_json
-        jsoned = JSON.generate t
+        jsoned = t.to_json
+
         puts 'jsoned=' + jsoned
+
+        puts 'non simplerecord object good'
 
         mcm = MyChildModel.new
         mcm.name = "child"

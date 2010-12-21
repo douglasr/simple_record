@@ -100,15 +100,15 @@ Querying is similar to ActiveRecord for the most part.
 
 To find all objects that match conditions returned in an Array:
 
-    Company.find(:all, :conditions => ["created_at > ?", 10.days.ago], :order=>"name", :limit=>50)
+    Company.find(:all, :conditions => ["created > ?", 10.days.ago], :order=>"name", :limit=>50)
 
 To find a single object:
 
-    Company.find(:first, :conditions => ["name = ? AND division = ? AND created_at > ?", "Appoxy", "West", 10.days.ago ])
+    Company.find(:first, :conditions => ["name = ? AND division = ? AND created > ?", "Appoxy", "West", 10.days.ago ])
 
 To count objects:
 
-    Company.find(:count, :conditions => ["name = ? AND division = ? AND created_at > ?", "Appoxy", "West", 10.days.ago ])
+    Company.find(:count, :conditions => ["name = ? AND division = ? AND created > ?", "Appoxy", "West", 10.days.ago ])
 
 You can also the dynamic method style, for instance the line below is the same as the Company.find(:first....) line above:
 
@@ -117,6 +117,10 @@ You can also the dynamic method style, for instance the line below is the same a
 To find all:
 
     Company.find_all_by_name_and_division("Appoxy", "West")
+
+Consistent read:
+
+    Company.find(:all, :conditions => ["created > ?", 10.days.ago], :order=>"name", :limit=>50, :consistent_read=>true)
 
 There are so many different combinations of the above for querying that I can't put them all here,
 but this should get you started.
@@ -193,7 +197,8 @@ values should be stored in S3. Fortunately SimpleRecord takes care of this for y
 string value.
 
     has_clobs :my_clob
-    
+
+These clob values will be stored in s3 under a bucket named: "#{aws_access_key}_lobs"
 
 ## Tips and Tricks and Things to Know
 
@@ -243,7 +248,7 @@ You can use any cache that supports the ActiveSupport::Cache::Store interface.
 
     SimpleRecord::Base.cache_store = my_cache_store
 
-If you want a simple in memory cache store, try: http://gemcutter.org/gems/local_cache . It supports max cache size and
+If you want a simple in memory cache store, try: <http://gemcutter.org/gems/local_cache>. It supports max cache size and
 timeouts. You can also use memcached or http://www.quetzall.com/cloudcache.
 
 ## Encryption
@@ -269,6 +274,19 @@ Hashing is not quite as transparent as it cannot be converted back to it's origi
 ob2.password == "mypassword"
 
 This will actually be compared by hashing "mypassword" first.
+
+## Sharding
+
+Sharding allows you to partition your data for a single class across multiple domains allowing increased write throughput,
+faster queries and more space (multiply your 10GB per domain limit).  And it's very easy to implement with SimpleRecord.
+
+    shard :shards=>:my_shards_function, :map=>:my_mapping_function
+
+The :shards function should return a list of shard names, for example: ['CA', 'FL', 'HI', ...] or [1,2,3,4,...]
+
+The :map function should return which shard name the object should be stored to.
+
+You can see some [example classes here](https://github.com/appoxy/simple_record/blob/master/test/my_sharded_model.rb).
 
 ## Kudos
 

@@ -3,8 +3,8 @@ require File.join(File.dirname(__FILE__), "/../lib/simple_record")
 require File.join(File.dirname(__FILE__), "./test_helpers")
 require "yaml"
 require 'aws'
-require 'my_model'
-require 'my_child_model'
+require_relative 'my_model'
+require_relative 'my_child_model'
 require 'active_support'
 
 class TestBase < Test::Unit::TestCase
@@ -19,9 +19,20 @@ class TestBase < Test::Unit::TestCase
         SimpleRecord.close_connection
     end
 
+    def delete_all(clz)
+        puts 'delete_all ' + clz.name
+        obs = clz.find(:all)
+        obs.each do |o|
+            o.delete
+        end
+#        @@sdb.select("select * from #{domain}") do |o|
+#            o.delete
+#        end
+    end
 
     def reset_connection
-        @config = YAML::load(File.open(File.expand_path("~/.test-configs/simple_record.yml")))
+        puts 'reset_connection'
+        @config = YAML::load(File.open(File.expand_path("~/.test_configs/simple_record.yml")))
         #puts 'inspecting config = ' + @config.inspect
 
         SimpleRecord.enable_logging

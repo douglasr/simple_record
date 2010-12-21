@@ -1,13 +1,12 @@
 require 'test/unit'
 require File.join(File.dirname(__FILE__), "/../lib/simple_record")
 require File.join(File.dirname(__FILE__), "./test_helpers")
-require File.join(File.dirname(__FILE__), "./test_base")
+require_relative "test_base"
 require "yaml"
 require 'aws'
-require 'my_model'
-require 'my_child_model'
-require 'model_with_enc'
-require 'active_support'
+require_relative 'my_model'
+require_relative 'my_child_model'
+require_relative 'model_with_enc'
 
 # Tests for SimpleRecord
 #
@@ -27,8 +26,8 @@ class TestSimpleRecord < TestBase
         assert !mm.updated.nil?
         assert !mm.id.nil?
         assert mm.age == 32
-        assert mm.cool = true
-        assert mm.name = "Travis"
+        assert mm.cool == true
+        assert mm.name == "Travis"
 
         id = mm.id
         puts 'id=' + id.to_s
@@ -40,8 +39,8 @@ class TestSimpleRecord < TestBase
         assert mm2.age == mm.age
         assert mm2.cool == mm.cool
         assert mm2.age == 32
-        assert mm2.cool = true
-        assert mm2.name = "Travis"
+        assert mm2.cool == true
+        assert mm2.name == "Travis"
         assert mm2.created.is_a? DateTime
 
         # test nilification
@@ -178,8 +177,8 @@ class TestSimpleRecord < TestBase
         assert mm.nickname == mm.name
 
         mm2 = MyModel.find(mm.id)
-        assert mm2.nickname = mm.nickname
-        assert mm2.name = mm.name
+        assert_equal mm2.nickname, mm.nickname
+        assert_equal mm2.name, mm.name
 
 
     end
@@ -263,7 +262,7 @@ class TestSimpleRecord < TestBase
         assert mmc3.my_model_id == mm2.id
         assert mmc3.changed?
         assert mmc3.my_model_changed?
-        assert mmc3.my_model.id = mm2.id
+        assert mmc3.my_model.id == mm2.id
 
     end
 
@@ -495,7 +494,7 @@ class TestSimpleRecord < TestBase
     end
 
     def test_attr_encrypted
-        require 'model_with_enc'
+        require_relative 'model_with_enc'
         ssn = "123456789"
         password = "my_password"
 
@@ -542,7 +541,7 @@ class TestSimpleRecord < TestBase
     def test_atts_using_strings_and_symbols
         mm = MyModel.new({:name=>"myname"})
         mm2 = MyModel.new({"name"=>"myname"})
-        assert mm.name = mm2.name
+        assert_equal(mm.name, mm2.name)
 
         mm.save
         mm2.save
@@ -550,7 +549,7 @@ class TestSimpleRecord < TestBase
 
         mm = MyModel.find(mm.id)
         mm2 = MyModel.find(mm2.id)
-        assert mm.name = mm2.name
+        assert_equal mm.name, mm2.name
     end
 
     def test_constructor_using_belongs_to_ids
@@ -560,10 +559,17 @@ class TestSimpleRecord < TestBase
 
         mm2 = MyChildModel.new({"name"=>"myname2", :my_model_id=>mm.id})
         puts 'mm2=' + mm2.inspect
-        assert mm.id == mm2.my_model_id, "#{mm.id} != #{mm2.my_model_id}"
+        assert_equal mm.id, mm2.my_model_id, "#{mm.id} != #{mm2.my_model_id}"
         mm3 = mm2.my_model
         puts 'mm3=' + mm3.inspect
-        assert mm.name == mm3.name
+        assert_equal mm.name, mm3.name
+
+        mm3 = MyChildModel.create(:my_model_id=>mm.id, :name=>"myname3")
+
+        sleep 2
+        mm4 = MyChildModel.find(mm3.id)
+        assert_equal mm4.my_model_id, mm.id
+        assert !mm4.my_model.nil?
 
     end
 
@@ -675,6 +681,29 @@ class TestSimpleRecord < TestBase
 
         assert mms.box_usage && mms.box_usage > 0
         assert mms.request_id
+
+    end
+
+    def test_multi_value_attributes
+
+        val = ['a', 'b', 'c']
+        val2 = [1, 2, 3]
+
+        mm = MyModel.new
+        mm.name = val
+        mm.age = val2
+        assert_equal val, mm.name
+        assert_equal val2, mm.age
+        mm.save
+
+        sleep 1
+        mm = MyModel.find(mm.id)
+        # Values are not returned in order
+        assert_equal val, mm.name.sort
+        assert_equal val2, mm.age.sort
+
+
+
 
     end
 

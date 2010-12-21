@@ -25,85 +25,161 @@
 # Forked off old ActiveRecord2sdb library.
 
 require 'aws'
-require 'sdb/active_sdb'
 require 'base64'
+require 'active_support'
+require 'active_support/core_ext'
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/attributes")
+require File.expand_path(File.dirname(__FILE__) + "/simple_record/active_sdb")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/callbacks")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/encryptor")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/exceptions")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/errors")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/json")
+require File.expand_path(File.dirname(__FILE__) + "/simple_record/logging")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/password")
+require File.expand_path(File.dirname(__FILE__) + "/simple_record/rails2")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/results_array")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/stats")
 require File.expand_path(File.dirname(__FILE__) + "/simple_record/translations")
+require_relative 'simple_record/sharding'
 
 
 module SimpleRecord
 
-    @@options = {}
-    @@stats = SimpleRecord::Stats.new
-    @@logging = false
+    @@options       = {}
+    @@stats         = SimpleRecord::Stats.new
+    @@logging       = false
+    @@s3            = nil
+    @@auto_close_s3 = false
+    @@logger        = Logger.new(STDOUT)
+    @@logger.level  = Logger::INFO
 
     class << self;
         attr_accessor :aws_access_key, :aws_secret_key
+
+        # Deprecated
+        def enable_logging
+            @@logging      = true
+            @@logger.level = Logger::DEBUG
+        end
+
+        # Deprecated
+        def disable_logging
+            @@logging = false
+        end
+
+        # Deprecated
+        def logging?
+            @@logging
+        end
+
+        def logger
+            @@logger
+        end
+
+        # This can be used to log queries and what not to a file.
+        # Params:
+        # :select=>{:filename=>"file_to_write_to", :format=>"csv"}
+        def log_usage(types={})
+            @usage_logging_options = {} unless @usage_logging_options
+            return if types.nil?
+            types.each_pair do |type, options|
+                options[:lines_between_flushes] = 100 unless options[:lines_between_flushes]
+                @usage_logging_options[type] = options
+            end
+            #puts 'SimpleRecord.usage_logging_options=' + SimpleRecord.usage_logging_options.inspect
+        end
+
+        def close_usage_log(type)
+            return unless @usage_logging_options[type]
+            @usage_logging_options[type][:file].close if @usage_logging_options[type][:file]
+        end
+
+        def usage_logging_options
+            @usage_logging_options
+        end
+
+        def stats
+            @@stats
+        end
+
+
+        # Create a new handle to an Sdb account. All handles share the same per process or per thread
+        # HTTP connection to Amazon Sdb. Each handle is for a specific account.
+        # The +params+ are passed through as-is to Aws::SdbInterface.new
+        # Params:
+        #    { :server       => 'sdb.amazonaws.com'  # Amazon service host: 'sdb.amazonaws.com'(default)
+        #      :port         => 443                  # Amazon service port: 80(default) or 443
+        #      :protocol     => 'https'              # Amazon service protocol: 'http'(default) or 'https'
+        #      :signature_version => '0'             # The signature version : '0' or '1'(default)
+        #      :connection_mode  => :default         # options are
+        #                                                  :default (will use best known safe (as in won't need explicit close) option, may change in the future)
+        #                                                  :per_request (opens and closes a connection on every request to SDB)
+        #                                                  :single (one thread across entire app)
+        #                                                  :per_thread (one connection per thread)
+        #                                                  :pool (uses a connection pool with a maximum number of connections - NOT IMPLEMENTED YET)
+        #      :logger       => Logger Object        # Logger instance: logs to STDOUT if omitted
+        def establish_connection(aws_access_key=nil, aws_secret_key=nil, options={})
+            @aws_access_key = aws_access_key
+            @aws_secret_key = aws_secret_key
+            @@options.merge!(options)
+            #puts 'SimpleRecord.establish_connection with options: ' + @@options.inspect
+            SimpleRecord::ActiveSdb.establish_connection(aws_access_key, aws_secret_key, @@options)
+            if options[:connection_mode] == :per_thread
+                @@auto_close_s3 = true
+                # todo: should we init this only when needed?
+                @@s3            = Aws::S3.new(SimpleRecord.aws_access_key, SimpleRecord.aws_secret_key, {:connection_mode=>:per_thread})
+            end
+        end
+
+        # Call this to close the connection to SimpleDB.
+        # If you're using this in Rails with per_thread connection mode, you should do this in
+        # an after_filter for each request.
+        def close_connection()
+            SimpleRecord::ActiveSdb.close_connection
+            @@s3.close_connection if @@auto_close_s3
+        end
+
+        # If you'd like to specify the s3 connection to use for LOBs, you can pass it in here.
+        # We recommend that this connection matches the type of connection you're using for SimpleDB,
+        # at least if you're using per_thread connection mode.
+        def s3=(s3)
+            @@s3 = s3
+        end
+
+        def s3
+            @@s3
+        end
+
+        def options
+            @@options
+        end
+
     end
 
-    def self.enable_logging
-        @@logging = true
-    end
-
-    def self.disable_logging
-        @@logging = false
-    end
-
-    def self.logging?
-        @@logging
-    end
-
-    def self.stats
-        @@stats
-    end
-
-    # Create a new handle to an Sdb account. All handles share the same per process or per thread
-    # HTTP connection to Amazon Sdb. Each handle is for a specific account.
-    # The +params+ are passed through as-is to Aws::SdbInterface.new
-    # Params:
-    #    { :server       => 'sdb.amazonaws.com'  # Amazon service host: 'sdb.amazonaws.com'(default)
-    #      :port         => 443                  # Amazon service port: 80(default) or 443
-    #      :protocol     => 'https'              # Amazon service protocol: 'http'(default) or 'https'
-    #      :signature_version => '0'             # The signature version : '0' or '1'(default)
-    #      :connection_mode  => :default         # options are
-    #                                                  :default (will use best known safe (as in won't need explicit close) option, may change in the future)
-    #                                                  :per_request (opens and closes a connection on every request to SDB)
-    #                                                  :single (one thread across entire app)
-    #                                                  :per_thread (one connection per thread)
-    #                                                  :pool (uses a connection pool with a maximum number of connections - NOT IMPLEMENTED YET)
-    #      :logger       => Logger Object        # Logger instance: logs to STDOUT if omitted
-    def self.establish_connection(aws_access_key=nil, aws_secret_key=nil, params={})
-        @aws_access_key = aws_access_key
-        @aws_secret_key = aws_secret_key
-        @@options.merge!(params)
-        #puts 'SimpleRecord.establish_connection with options: ' + @@options.inspect
-        Aws::ActiveSdb.establish_connection(aws_access_key, aws_secret_key, @@options)
-    end
-
-    def self.close_connection()
-        Aws::ActiveSdb.close_connection
-    end
-
-    def self.options
-        @@options
-    end
+    class Base < SimpleRecord::ActiveSdb::Base
 
 
-    class Base < Aws::ActiveSdb::Base
+#        puts 'Is ActiveModel defined? ' + defined?(ActiveModel).inspect
+        if defined?(ActiveModel)
+            extend ActiveModel::Naming
+            include ActiveModel::Conversion
+            include ActiveModel::Validations
+        else
+            attr_accessor :errors
+            include SimpleRecord::Rails2
+        end
 
         include SimpleRecord::Translations
 #        include SimpleRecord::Attributes
-        extend SimpleRecord::Attributes
+        extend SimpleRecord::Attributes::ClassMethods
+        include SimpleRecord::Attributes
+        extend SimpleRecord::Sharding::ClassMethods
+        include SimpleRecord::Sharding
         include SimpleRecord::Callbacks
         include SimpleRecord::Json
+        include SimpleRecord::Logging
+        extend SimpleRecord::Logging::ClassMethods
 
         def self.extended(base)
 
@@ -125,13 +201,13 @@ module SimpleRecord
             #we have to handle the virtuals.
             Attributes.handle_virtuals(attrs)
 
-            @errors=SimpleRecord_errors.new
-            @dirty = {}
+            @errors=SimpleRecord_errors.new if not (defined?(ActiveModel))
+            @dirty         = {}
 
-            @attributes = {} # sdb values
+            @attributes    = {} # sdb values
             @attributes_rb = {} # ruby values
-            @lobs = {}
-            @new_record = true
+            @lobs          = {}
+            @new_record    = true
 
         end
 
@@ -155,14 +231,17 @@ module SimpleRecord
         end
 
 
+        def persisted?
+            true
+        end
+
+
         def defined_attributes_local
             # todo: store this somewhere so it doesn't keep going through this
             ret = self.class.defined_attributes
             ret.merge!(self.class.superclass.defined_attributes) if self.class.superclass.respond_to?(:defined_attributes)
         end
 
-
-        attr_accessor :errors
 
         class << self;
             attr_accessor :domain_prefix
@@ -205,8 +284,8 @@ module SimpleRecord
             unless @domain
                 # This strips off the module if there is one.
                 n2 = name.split('::').last || name
-                puts 'n2=' + n2
-                if defined? ActiveSupport::CoreExtensions::String::Inflections
+#                puts 'n2=' + n2
+                if n2.respond_to?(:tableize)
                     @domain = n2.tableize
                 else
                     @domain = n2.downcase
@@ -217,19 +296,13 @@ module SimpleRecord
             domain_name_for_class
         end
 
-        def get_attribute_sdb(name)
-            name = name.to_sym
-            ret = strip_array(@attributes[sdb_att_name(name)])
-            return ret
-        end
-
         def has_id_on_end(name_s)
             name_s = name_s.to_s
             name_s.length > 3 && name_s[-3..-1] == "_id"
         end
 
         def get_att_meta(name)
-            name_s = name.to_s
+            name_s   = name.to_s
             att_meta = defined_attributes_local[name.to_sym]
             if att_meta.nil? && has_id_on_end(name_s)
                 att_meta = defined_attributes_local[name_s[0..-4].to_sym]
@@ -246,7 +319,7 @@ module SimpleRecord
         end
 
         def strip_array(arg)
-            if arg.class==Array
+            if arg.is_a? Array
                 if arg.length==1
                     ret = arg[0]
                 else
@@ -261,7 +334,7 @@ module SimpleRecord
 
         def make_dirty(arg, value)
             sdb_att_name = sdb_att_name(arg)
-            arg = arg.to_s
+            arg          = arg.to_s
 
 #            puts "Marking #{arg} dirty with #{value}" if SimpleRecord.logging?
             if @dirty.include?(sdb_att_name)
@@ -311,58 +384,28 @@ module SimpleRecord
             @@cache_store
         end
 
-        def domain_ok(ex)
+        def domain_ok(ex, options={})
             if (ex.message().index("NoSuchDomain") != nil)
-                #puts "Creating new SimpleDB Domain: " + domain
-                self.class.create_domain
+                dom = options[:domain] || domain
+                self.class.create_domain(dom)
                 return true
             end
             return false
         end
 
-        def valid?
-            errors.clear
-
-#            run_callbacks(:validate)
-            validate
-
-            if new_record?
-#                run_callbacks(:validate_on_create)
-                validate_on_create
-            else
-#                run_callbacks(:validate_on_update)
-                validate_on_update
-            end
-
-            errors.empty?
-        end
 
         def new_record?
             # todo: new_record in activesdb should align with how we're defining a new record here, ie: if id is nil
             super
         end
 
-        def invalid?
-            !valid?
-        end
-
-        def validate
-            true
-        end
-
-        def validate_on_create
-            true
-        end
-
-        def validate_on_update
-            true
-        end
 
         @create_domain_called = false
 
         # Options:
         #   - :except => Array of attributes to NOT save
         #   - :dirty => true - Will only store attributes that were modified. To make it save regardless and have it update the :updated value, include this and set it to false.
+        #   - :domain => Explicitly define domain to use.
         #
         def save(options={})
 #            puts 'SAVING: ' + self.inspect if SimpleRecord.logging?
@@ -374,7 +417,7 @@ module SimpleRecord
                 return true if @dirty.size == 0 # Nothing to save so skip it
             end
             is_create = self[:id].nil?
-            ok = pre_save(options)
+            ok        = pre_save(options) # Validates and sets ID
             if ok
                 begin
                     dirty = @dirty
@@ -384,13 +427,14 @@ module SimpleRecord
                         return true if @dirty.size == 0 # This should probably never happen because after pre_save, created/updated dates are changed
                         options[:dirty_atts] = @dirty
                     end
-                    to_delete = get_atts_to_delete
+                    to_delete                = get_atts_to_delete
                     SimpleRecord.stats.saves += 1
-#                    puts 'SELF BEFORE super=' + self.inspect
-#                    puts 'dirty before2=' + @dirty.inspect
+
+                    if self.class.is_sharded?
+                        options[:domain] = sharded_domain
+                    end
+
                     if super(options)
-#                        puts 'dirty super=' + @dirty.inspect
-#                        puts 'SELF AFTER super=' + self.inspect
                         self.class.cache_results(self)
                         delete_niled(to_delete)
                         save_lobs(dirty)
@@ -404,9 +448,9 @@ module SimpleRecord
                     else
                         return false
                     end
-                rescue Aws::AwsError
+                rescue Aws::AwsError => ex
                     # puts "RESCUED in save: " + $!
-                    if (domain_ok($!))
+                    if (domain_ok(ex, options))
                         if !@create_domain_called
                             @create_domain_called = true
                             save(options)
@@ -458,6 +502,10 @@ module SimpleRecord
         end
 
         def s3
+
+            return SimpleRecord.s3 if SimpleRecord.s3
+            # todo: should optimize this somehow, like use the same connection_mode as used in SR
+            # or keep open while looping in ResultsArray.
             Aws::S3.new(SimpleRecord.aws_access_key, SimpleRecord.aws_secret_key)
         end
 
@@ -496,17 +544,30 @@ module SimpleRecord
         end
 
 
+        def validate
+            true
+        end
+
+        def validate_on_create
+            true
+        end
+
+        def validate_on_update
+            true
+        end
+
+
         def pre_save(options)
 
             is_create = self[:id].nil?
-            ok = run_before_validation && (is_create ? run_before_validation_on_create : run_before_validation_on_update)
+            ok        = run_before_validation && (is_create ? run_before_validation_on_create : run_before_validation_on_update)
             return false unless ok
 
             validate()
 
             is_create ? validate_on_create : validate_on_update
 #      puts 'AFTER VALIDATIONS, ERRORS=' + errors.inspect
-            if (!@errors.nil? && @errors.length > 0)
+            if (!errors.nil? && errors.size > 0)
 #        puts 'THERE ARE ERRORS, returning false'
                 return false
             end
@@ -529,6 +590,7 @@ module SimpleRecord
                 # Now translate all fields into SimpleDB friendly strings
 #                convert_all_atts_to_sdb()
             end
+            prepare_for_update
             ok
         end
 
@@ -587,7 +649,7 @@ module SimpleRecord
         def self.delete_all(*params)
             # could make this quicker by just getting item_names and deleting attributes rather than creating objects
             obs = self.find(params)
-            i = 0
+            i   = 0
             obs.each do |a|
                 a.delete
                 i+=1
@@ -597,7 +659,7 @@ module SimpleRecord
 
         def self.destroy_all(*params)
             obs = self.find(params)
-            i = 0
+            i   = 0
             obs.each do |a|
                 a.destroy
                 i+=1
@@ -606,7 +668,12 @@ module SimpleRecord
         end
 
         def delete()
-            super
+            # TODO: DELETE CLOBS, etc from s3
+            options = {}
+            if self.class.is_sharded?
+                options[:domain] = sharded_domain
+            end
+            super(options)
         end
 
         def destroy
@@ -614,122 +681,6 @@ module SimpleRecord
         end
 
 
-        # Since SimpleDB supports multiple attributes per value, the values are an array.
-        # This method will return the value unwrapped if it's the only, otherwise it will return the array.
-        def get_attribute(name)
-#            puts "GET #{arg}"
-            # Check if this arg is already converted
-            name_s = name.to_s
-            name = name.to_sym
-            att_meta = get_att_meta(name)
-#            puts "att_meta for #{name}: " + att_meta.inspect
-            if att_meta && att_meta.type == :clob
-                ret = @lobs[name]
-#                puts 'get_attribute clob ' + ret.inspect
-                if ret
-                    if ret.is_a? RemoteNil
-                        return nil
-                    else
-                        return ret
-                    end
-                end
-                # get it from s3
-                unless new_record?
-                    begin
-                        ret = s3_bucket.get(s3_lob_id(name))
-#                        puts 'got from s3 ' + ret.inspect
-                        SimpleRecord.stats.s3_gets += 1
-                    rescue Aws::AwsError => ex
-                        if ex.include? /NoSuchKey/
-                            ret = nil
-                        else
-                            raise ex
-                        end
-                    end
-
-                    if ret.nil?
-                        ret = RemoteNil.new
-                    end
-                end
-                @lobs[name] = ret
-                return nil if ret.is_a? RemoteNil
-                return ret
-            else
-                @attributes_rb = {} unless @attributes_rb # was getting errors after upgrade.
-                ret = @attributes_rb[name_s] # instance_variable_get(instance_var)
-                return ret unless ret.nil?
-                return nil if ret.is_a? RemoteNil
-                ret = get_attribute_sdb(name)
-                ret = sdb_to_ruby(name, ret)
-                @attributes_rb[name_s] = ret
-                return ret
-            end
-
-        end
-
-        def set(name, value, dirtify=true)
-#            puts "SET #{name}=#{value.inspect}" if SimpleRecord.logging?
-#            puts "self=" + self.inspect
-            attname = name.to_s # default attname
-            name = name.to_sym
-            att_meta = get_att_meta(name)
-            store_rb_val = false
-            if att_meta.nil?
-                # check if it ends with id and see if att_meta is there
-                ends_with = name.to_s[-3, 3]
-                if ends_with == "_id"
-#                    puts 'ends with id'
-                    n2 = name.to_s[0, name.length-3]
-#                    puts 'n2=' + n2
-                    att_meta = defined_attributes_local[n2.to_sym]
-#                    puts 'defined_attributes_local=' + defined_attributes_local.inspect
-                    attname = name.to_s
-                    attvalue = value
-                    name = n2.to_sym
-                end
-                return if att_meta.nil?
-            else
-                if att_meta.type == :belongs_to
-                    ends_with = name.to_s[-3, 3]
-                    if ends_with == "_id"
-                        att_name = name.to_s
-                        attvalue = value
-                    else
-                        attname = name.to_s + '_id'
-                        attvalue = value.nil? ? nil : value.id
-                        store_rb_val = true
-                    end
-                elsif att_meta.type == :clob
-                    make_dirty(name, value) if dirtify
-                    @lobs[name] = value
-                    return
-                else
-                    attname = name.to_s
-                    attvalue = att_meta.init_value(value)
-#                  attvalue = value
-                    #puts 'converted ' + value.inspect + ' to ' + attvalue.inspect
-                end
-            end
-            attvalue = strip_array(attvalue)
-            make_dirty(name, attvalue) if dirtify
-#            puts "ARG=#{attname.to_s} setting to #{attvalue}"
-            sdb_val = ruby_to_sdb(name, attvalue)
-#            puts "sdb_val=" + sdb_val.to_s
-            @attributes[attname] = sdb_val
-#            attvalue = wrap_if_required(name, attvalue, sdb_val)
-#            puts 'attvalue2=' + attvalue.to_s
-
-            if store_rb_val
-                @attributes_rb[name.to_s] = value
-            else
-                @attributes_rb.delete(name.to_s)
-            end
-
-        end
-
-        def set_attribute_sdb(name, val)
-            @attributes[sdb_att_name(name)] = val
-        end
 
         def delete_niled(to_delete)
 #            puts 'to_delete=' + to_delete.inspect
@@ -768,7 +719,7 @@ module SimpleRecord
             if $&
                 before=$`
                 middle=$&
-                after=$'
+                after =$'
 
                 before =~ /'$/ #is there already a quote immediately before the match?
                 unless $&
@@ -800,67 +751,79 @@ module SimpleRecord
         # Extra options:
         #   :per_token => the number of results to return per next_token, max is 2500.
         #   :consistent_read => true/false  --  as per http://developer.amazonwebservices.com/connect/entry.jspa?externalID=3572
+        #   :retries => maximum number of times to retry this query on an error response.
+        #   :shard => shard name or array of shard names to use on this query.
         def self.find(*params)
             #puts 'params=' + params.inspect
-            q_type = :all
-            select_attributes=[]
 
+            q_type           = :all
+            select_attributes=[]
             if params.size > 0
                 q_type = params[0]
             end
+            options = {}
+            if params.size > 1
+                options = params[1]
+            end
+
+            if !options[:shard_find] && is_sharded?
+                # then break off and get results across all shards
+                return find_sharded(*params)
+            end
 
             # Pad and Offset number attributes
-            options = {}
+            params_dup = params.dup
             if params.size > 1
                 options = params[1]
                 #puts 'options=' + options.inspect
                 #puts 'after collect=' + options.inspect
                 convert_condition_params(options)
-                per_token = options[:per_token]
+                per_token       = options[:per_token]
                 consistent_read = options[:consistent_read]
                 if per_token || consistent_read then
-                    op_dup = options.dup
-                    op_dup[:limit] = per_token # simpledb uses Limit as a paging thing, not what is normal
+                    op_dup                   = options.dup
+                    op_dup[:limit]           = per_token # simpledb uses Limit as a paging thing, not what is normal
                     op_dup[:consistent_read] = consistent_read
-                    params[1] = op_dup
+                    params_dup[1]            = op_dup
                 end
-
             end
 #            puts 'params2=' + params.inspect
 
-            results = q_type == :all ? [] : nil
+            ret = q_type == :all ? [] : nil
             begin
-                results=find_with_metadata(*params)
-                # puts "RESULT=" + results.inspect
+
+                results=find_with_metadata(*params_dup)
+#                puts "RESULT=" + results.inspect
+                write_usage(:select, domain, q_type, options, results)
                 #puts 'params3=' + params.inspect
                 SimpleRecord.stats.selects += 1
                 if q_type == :count
-                    results = results[:count]
+                    ret = results[:count]
                 elsif q_type == :first
                     ret = results[:items].first
                     # todo: we should store request_id and box_usage with the object maybe?
                     cache_results(ret)
-                    results = ret
                 elsif results[:single]
-                    results = results[:single]
-                    cache_results(results)
+                    ret = results[:single]
+                    cache_results(ret)
                 else
                     if results[:items] #.is_a?(Array)
                         cache_results(results[:items])
-                        results = SimpleRecord::ResultsArray.new(self, params, results, next_token)
+                        ret = SimpleRecord::ResultsArray.new(self, params, results, next_token)
                     end
                 end
-            rescue Aws::AwsError, Aws::ActiveSdb::ActiveSdbError
-#                puts "RESCUED: " + $!.message
-                if ($!.message().index("NoSuchDomain") != nil)
+            rescue Aws::AwsError, SimpleRecord::ActiveSdb::ActiveSdbError => ex
+#                puts "RESCUED: " + ex.message
+                if (ex.message().index("NoSuchDomain") != nil)
                     # this is ok
-                elsif ($!.message() =~ @@regex_no_id)
-                    results = nil
+                elsif (ex.message() =~ @@regex_no_id)
+                    ret = nil
                 else
-                    raise $!
+                    raise ex
                 end
             end
-            return results
+#            puts 'single2=' + ret.inspect
+            return ret
         end
 
         def self.select(*params)
@@ -884,14 +847,14 @@ module SimpleRecord
         def self.paginate(options={})
 #            options = args.pop
 #            puts 'paginate options=' + options.inspect if SimpleRecord.logging?
-            page     = options[:page] || 1
-            per_page = options[:per_page] || 50
+            page               = options[:page] || 1
+            per_page           = options[:per_page] || 50
 #            total    = options[:total_entries].to_i
-            options[:page] = page.to_i # makes sure it's to_i
+            options[:page]     = page.to_i # makes sure it's to_i
             options[:per_page] = per_page.to_i
-            options[:limit] = options[:page] * options[:per_page]
+            options[:limit]    = options[:page] * options[:per_page]
 #            puts 'paging options=' + options.inspect
-            fr = find(:all, options)
+            fr                 = find(:all, options)
             return fr
 
         end
@@ -915,15 +878,15 @@ module SimpleRecord
                     # todo: cache each result
                     results.each do |item|
                         class_name = item.class.name
-                        id = item.id
-                        cache_key = self.cache_key(class_name, id)
+                        id         = item.id
+                        cache_key  = self.cache_key(class_name, id)
                         #puts 'caching result at ' + cache_key + ': ' + results.inspect
                         cache_store.write(cache_key, item, :expires_in =>30)
                     end
                 else
                     class_name = results.class.name
-                    id = results.id
-                    cache_key = self.cache_key(class_name, id)
+                    id         = results.id
+                    cache_key  = self.cache_key(class_name, id)
                     #puts 'caching result at ' + cache_key + ': ' + results.inspect
                     cache_store.write(cache_key, results, :expires_in =>30)
                 end
@@ -972,20 +935,14 @@ module SimpleRecord
             id.hash
         end
 
-        private
-        def set_attributes(atts)
-            atts.each_pair do |k, v|
-                set(k, v)
-            end
-        end
 
     end
 
 
     class Activerecordtosdb_subrecord_array
         def initialize(subname, referencename, referencevalue)
-            @subname=subname.classify
-            @referencename=referencename.tableize.singularize + "_id"
+            @subname       =subname.classify
+            @referencename =referencename.tableize.singularize + "_id"
             @referencevalue=referencevalue
         end
 
@@ -1037,7 +994,7 @@ module SimpleRecord
 
         def create(*params)
             params[0][@referencename]=@referencevalue
-            record = eval(@subname).new(*params)
+            record                   = eval(@subname).new(*params)
             record.save
         end
 
